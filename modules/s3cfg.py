@@ -1916,6 +1916,13 @@ class S3Config(Storage):
 
         return excluded_fields.get(resourcename, [])
 
+    def get_pdf_max_rows(self):
+        """
+            Maximum number of records in a single PDF table/list export
+                - None for unlimited
+        """
+        return self.base.get("pdf_max_rows", 1000)
+
     # -------------------------------------------------------------------------
     # XLS Export Settings
     #
@@ -3058,11 +3065,11 @@ class S3Config(Storage):
         # Else fallback to the default OID
         return self.cap.get("identifier_oid", "")
 
-    def get_cap_expire_offset(self):
+    def get_cap_info_effective_period(self):
         """
-            Offset period for expiration
+            The period (in days) after which alert info segments expire
         """
-        return self.cap.get("expire_offset", 2)
+        return self.cap.get("info_effective_period", 2)
 
     def get_cap_codes(self):
         """

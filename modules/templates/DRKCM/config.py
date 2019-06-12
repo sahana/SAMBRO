@@ -40,6 +40,7 @@ UI_DEFAULTS = {#"case_arrival_date_label": "Date of Entry",
                "appointments_use_organizer": False,
                "response_activity_autolink": False,
                "response_due_date": True,
+               "response_effort_required": False,
                "response_planning": True,
                "response_themes_details": False,
                "response_themes_sectors": False,
@@ -75,6 +76,7 @@ UI_OPTIONS = {"LEA": {"case_arrival_date_label": "Date of AKN",
                       "appointments_use_organizer": True,
                       "response_activity_autolink": True,
                       "response_due_date": False,
+                      "response_effort_required": True,
                       "response_planning": False,
                       "response_themes_details": True,
                       "response_themes_sectors": True,
@@ -2044,6 +2046,11 @@ def config(settings):
                 if settings.get_dvr_response_due_date():
                     response_action_fields[1:1] = ["date_due"]
 
+                s3db.add_custom_callback("dvr_response_action",
+                                         "onvalidation",
+                                         response_action_onvalidation,
+                                         )
+
                 inline_responses = S3SQLInlineComponent(
                                             "response_action",
                                             label = T("Actions"),
@@ -2646,6 +2653,54 @@ def config(settings):
             field.requires = IS_EMPTY_OR(field.requires)
 
     # -------------------------------------------------------------------------
+    def response_action_onvalidation(form):
+        """
+            Onvalidation for response actions:
+                - enforce hours for closed-statuses (org-specific UI option)
+        """
+
+        ui_options = get_ui_options()
+        if ui_options.get("response_effort_required"):
+
+            db = current.db
+            s3db = current.s3db
+            form_vars = form.vars
+
+            # Get the new status
+            if "status_id" in form_vars:
+                status_id = form_vars.status_id
+            else:
+                status_id = s3db.dvr_response_action.status_id.default
+
+            try:
+                hours = form_vars.hours
+            except AttributeError:
+                # No hours field in form, so no point validating it
+                return
+
+            if hours is None:
+                # If new status is closed, require hours
+                stable = s3db.dvr_response_status
+                query = (stable.id == status_id)
+                status = db(query).select(stable.is_closed,
+                                          limitby = (0, 1),
+                                          ).first()
+                if status and status.is_closed:
+                    form.errors["hours"] = T("Please specify the effort spent")
+
+    # -------------------------------------------------------------------------
+    def response_date_dt_orderby(field, direction, orderby, left_joins):
+        """
+            When sorting response actions by date, use created_on to maintain
+            consistent order of multiple response actions on the same date
+        """
+
+        sorting = {"table": field.tablename,
+                   "direction": direction,
+                   }
+        orderby.append("%(table)s.date%(direction)s,%(table)s.created_on%(direction)s" % sorting)
+
+    # -------------------------------------------------------------------------
     def customise_dvr_response_action_resource(r, tablename):
 
         #db = current.db
@@ -2732,6 +2787,11 @@ def config(settings):
             field.default = current.auth.s3_logged_in_human_resource()
             field.represent = s3db.hrm_HumanResourceRepresent(show_link=False)
             field.widget = None
+            # Use field options as filter options
+            try:
+                hr_filter_opts = field.requires.options()
+            except AttributeError:
+                hr_filter_opts = False
 
             # Require explicit unit in hours-widget above 4 hours
             from s3 import S3HoursWidget
@@ -2812,7 +2872,6 @@ def config(settings):
                 s3db.configure("dvr_response_action",
                                filter_widgets = None,
                                list_fields = list_fields,
-                               orderby = "dvr_response_action.date desc",
                                pdf_fields = pdf_fields,
                                )
                 if "viewing" in get_vars:
@@ -2896,6 +2955,7 @@ def config(settings):
                         S3DateFilter("date", hidden=not is_report),
                         S3OptionsFilter(
                             "response_theme_ids",
+                            header = True,
                             hidden = True,
                             options = lambda: \
                                       s3_get_filter_opts("dvr_response_theme",
@@ -2914,8 +2974,16 @@ def config(settings):
 
                     if use_due_date:
                         filter_widgets.insert(3, S3DateFilter("date_due",
-                                                              hidden=is_report,
+                                                              hidden = is_report,
                                                               ))
+                    if hr_filter_opts:
+                        hr_filter_opts = dict(hr_filter_opts)
+                        hr_filter_opts.pop('', None)
+                        filter_widgets.insert(-2, S3OptionsFilter("human_resource_id",
+                                                                  hidden = True,
+                                                                  options = dict(hr_filter_opts),
+                                                                  header = True,
+                                                                  ))
 
                     if multiple_orgs:
                         # Add case organisation filter
@@ -2938,7 +3006,7 @@ def config(settings):
                                    )
 
 
-        # Organizer
+        # Organizer and PDF exports
         if response_themes_details:
             description = [(T("Themes"), "response_action_theme.id"),
                            "human_resource_id",
@@ -2956,7 +3024,20 @@ def config(settings):
                                    "color": "status_id",
                                    "colors": s3db.dvr_response_status_colors,
                                    },
+                       pdf_format = "list" if response_themes_details else "table",
+                       orderby = "dvr_response_action.date desc, dvr_response_action.created_on desc",
                        )
+
+        # Maintain consistent order for multiple response actions
+        # on the same day (by enforcing created_on as secondary order criterion)
+        field = table.date
+        field.represent.dt_orderby = response_date_dt_orderby
+
+        # Custom onvalidation
+        s3db.add_custom_callback("dvr_response_action",
+                                 "onvalidation",
+                                 response_action_onvalidation,
+                                 )
 
     settings.customise_dvr_response_action_resource = customise_dvr_response_action_resource
 
@@ -3996,16 +4077,17 @@ def drk_dvr_rheader(r, tabs=None):
                 rheader_fields.append([(T("Size of Family"), household_size),
                                        (arrival_date_label, arrival_date),
                                        ])
+            colspan = 5
 
             if multiple_orgs:
                 # Show organisation if user can see cases from multiple orgs
-                rheader_fields.insert(0, [(T("Organisation"), organisation, 7)])
+                rheader_fields.insert(0, [(T("Organisation"), organisation, colspan)])
             if flags_sel:
-                rheader_fields.append([(T("Flags"), flags, 7)])
+                rheader_fields.append([(T("Flags"), flags, colspan)])
             if ui_opts_get("case_header_protection_themes"):
                 rheader_fields.append([(T("Protection Need"),
                                         get_protection_themes,
-                                        7,
+                                        colspan,
                                         )])
             if archived:
                 rheader_fields.insert(0, [(None, hint)])
